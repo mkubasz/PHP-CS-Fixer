@@ -1,0 +1,30 @@
+--TEST--
+Integration of fixers: no_space_around_double_colon,method_chaining_indentation with static chaining.
+--RULESET--
+{"no_space_around_double_colon": true, "method_chaining_indentation": true}
+--EXPECT--
+<?php
+
+use Foo;
+
+Foo::bar()
+    ->baz()
+    ->cux();
+
+StaticClass::method1()
+    ::method2()
+    ::method3();
+
+--INPUT--
+<?php
+
+use Foo;
+
+Foo
+        ::bar()
+    ->baz()
+->cux();
+
+StaticClass :: method1()
+:: method2()
+        :: method3();

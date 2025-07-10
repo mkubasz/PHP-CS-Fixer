@@ -31,8 +31,11 @@ final class MethodChainingIndentationFixer extends AbstractFixer implements Whit
     public function getDefinition(): FixerDefinitionInterface
     {
         return new FixerDefinition(
-            'Method chaining MUST be properly indented. Method chaining with different levels of indentation is not supported.',
-            [new CodeSample("<?php\n\$user->setEmail('voff.web@gmail.com')\n         ->setPassword('233434');\n")]
+            'Method chaining (both instance and static) MUST be properly indented. Method chaining with different levels of indentation is not supported.',
+            [
+                new CodeSample("<?php\n\$user->setEmail('voff.web@gmail.com')\n         ->setPassword('233434');\n"),
+                new CodeSample("<?php\nStaticClass::method1('value')\n         ::method2('value');\n")
+            ]
         );
     }
 
@@ -48,7 +51,8 @@ final class MethodChainingIndentationFixer extends AbstractFixer implements Whit
 
     public function isCandidate(Tokens $tokens): bool
     {
-        return $tokens->isAnyTokenKindsFound(Token::getObjectOperatorKinds());
+        return $tokens->isAnyTokenKindsFound(Token::getObjectOperatorKinds())
+            || $tokens->isTokenKindFound(T_DOUBLE_COLON);
     }
 
     protected function applyFix(\SplFileInfo $file, Tokens $tokens): void
@@ -56,51 +60,137 @@ final class MethodChainingIndentationFixer extends AbstractFixer implements Whit
         $lineEnding = $this->whitespacesConfig->getLineEnding();
 
         for ($index = 1, $count = \count($tokens); $index < $count; ++$index) {
-            if (!$tokens[$index]->isObjectOperator()) {
+            if (!$this->isMethodChainingOperator($tokens[$index])) {
                 continue;
             }
 
-            $endParenthesisIndex = $tokens->getNextTokenOfKind($index, ['(', ';', ',', [T_CLOSE_TAG]]);
-            $previousEndParenthesisIndex = $tokens->getPrevTokenOfKind($index, [')']);
+            // Handle both -> and :: operators
+            if ($tokens[$index]->isObjectOperator()) {
+                $this->processInstanceChaining($tokens, $index, $lineEnding);
+            } elseif ($tokens[$index]->isGivenKind(T_DOUBLE_COLON)) {
+                $this->processStaticChaining($tokens, $index, $lineEnding);
+            }
+        }
+    }
 
-            if (
-                null === $endParenthesisIndex
-                || !$tokens[$endParenthesisIndex]->equals('(') && null === $previousEndParenthesisIndex
-            ) {
+    /**
+     * Check if token is a method chaining operator (-> or ::)
+     */
+    private function isMethodChainingOperator(Token $token): bool
+    {
+        return $token->isObjectOperator() || $token->isGivenKind(T_DOUBLE_COLON);
+    }
+
+    /**
+     * Process instance method chaining (-> operators)
+     * This maintains the existing logic for backward compatibility
+     */
+    private function processInstanceChaining(Tokens $tokens, int $index, string $lineEnding): void
+    {
+        $endParenthesisIndex = $tokens->getNextTokenOfKind($index, ['(', ';', ',', [T_CLOSE_TAG]]);
+        $previousEndParenthesisIndex = $tokens->getPrevTokenOfKind($index, [')']);
+
+        if (
+            null === $endParenthesisIndex
+            || !$tokens[$endParenthesisIndex]->equals('(') && null === $previousEndParenthesisIndex
+        ) {
+            return;
+        }
+
+        if ($this->canBeMovedToNextLine($index, $tokens)) {
+            $newline = new Token([T_WHITESPACE, $lineEnding]);
+
+            if ($tokens[$index - 1]->isWhitespace()) {
+                $tokens[$index - 1] = $newline;
+            } else {
+                $tokens->insertAt($index, $newline);
+                ++$index;
+                ++$endParenthesisIndex;
+            }
+        }
+
+        $currentIndent = $this->getIndentAt($tokens, $index - 1);
+
+        if (null === $currentIndent) {
+            return;
+        }
+
+        $expectedIndent = $this->getExpectedIndentAt($tokens, $index);
+
+        if ($currentIndent !== $expectedIndent) {
+            $tokens[$index - 1] = new Token([T_WHITESPACE, $lineEnding.$expectedIndent]);
+        }
+
+        if (!$tokens[$endParenthesisIndex]->equals('(')) {
+            return;
+        }
+
+        $endParenthesisIndex = $tokens->findBlockEnd(Tokens::BLOCK_TYPE_PARENTHESIS_BRACE, $endParenthesisIndex);
+
+        for ($searchIndex = $index + 1; $searchIndex < $endParenthesisIndex; ++$searchIndex) {
+            $searchToken = $tokens[$searchIndex];
+
+            if (!$searchToken->isWhitespace()) {
                 continue;
             }
 
-            if ($this->canBeMovedToNextLine($index, $tokens)) {
-                $newline = new Token([T_WHITESPACE, $lineEnding]);
+            $content = $searchToken->getContent();
 
-                if ($tokens[$index - 1]->isWhitespace()) {
-                    $tokens[$index - 1] = $newline;
-                } else {
-                    $tokens->insertAt($index, $newline);
-                    ++$index;
-                    ++$endParenthesisIndex;
-                }
-            }
-
-            $currentIndent = $this->getIndentAt($tokens, $index - 1);
-
-            if (null === $currentIndent) {
+            if (!Preg::match('/\R/', $content)) {
                 continue;
             }
 
-            $expectedIndent = $this->getExpectedIndentAt($tokens, $index);
+            $content = Preg::replace(
+                '/(\R)'.$currentIndent.'(\h*)$/D',
+                '$1'.$expectedIndent.'$2',
+                $content
+            );
 
-            if ($currentIndent !== $expectedIndent) {
-                $tokens[$index - 1] = new Token([T_WHITESPACE, $lineEnding.$expectedIndent]);
+            $tokens[$searchIndex] = new Token([$searchToken->getId(), $content]);
+        }
+    }
+
+    /**
+     * Process static method chaining (:: operators)
+     * New logic for handling static method chaining
+     */
+    private function processStaticChaining(Tokens $tokens, int $index, string $lineEnding): void
+    {
+        // Only process if this is actually a method call chain, not a class constant or other usage
+        if (!$this->isStaticMethodChain($tokens, $index)) {
+            return;
+        }
+
+        // Check if we should move to next line
+        if ($this->canStaticBeMovedToNextLine($index, $tokens)) {
+            $newline = new Token([T_WHITESPACE, $lineEnding]);
+
+            if ($tokens[$index - 1]->isWhitespace()) {
+                $tokens[$index - 1] = $newline;
+            } else {
+                $tokens->insertAt($index, $newline);
+                ++$index;
             }
+        }
 
-            if (!$tokens[$endParenthesisIndex]->equals('(')) {
-                continue;
-            }
+        $currentIndent = $this->getIndentAt($tokens, $index - 1);
 
-            $endParenthesisIndex = $tokens->findBlockEnd(Tokens::BLOCK_TYPE_PARENTHESIS_BRACE, $endParenthesisIndex);
+        if (null === $currentIndent) {
+            return;
+        }
 
-            for ($searchIndex = $index + 1; $searchIndex < $endParenthesisIndex; ++$searchIndex) {
+        $expectedIndent = $this->getExpectedIndentForStatic($tokens, $index);
+
+        if ($currentIndent !== $expectedIndent) {
+            $tokens[$index - 1] = new Token([T_WHITESPACE, $lineEnding.$expectedIndent]);
+        }
+
+        // Handle indentation within method parameters for static calls
+        $nextOpenParen = $tokens->getNextTokenOfKind($index, ['(']);
+        if (null !== $nextOpenParen && $tokens[$nextOpenParen]->equals('(')) {
+            $endParenIndex = $tokens->findBlockEnd(Tokens::BLOCK_TYPE_PARENTHESIS_BRACE, $nextOpenParen);
+
+            for ($searchIndex = $index + 1; $searchIndex < $endParenIndex; ++$searchIndex) {
                 $searchToken = $tokens[$searchIndex];
 
                 if (!$searchToken->isWhitespace()) {
@@ -122,6 +212,104 @@ final class MethodChainingIndentationFixer extends AbstractFixer implements Whit
                 $tokens[$searchIndex] = new Token([$searchToken->getId(), $content]);
             }
         }
+    }
+
+    /**
+     * Check if the :: operator is part of a static method chain
+     */
+    private function isStaticMethodChain(Tokens $tokens, int $index): bool
+    {
+        if (!$tokens[$index]->isGivenKind(T_DOUBLE_COLON)) {
+            return false;
+        }
+
+        $nextMeaningful = $tokens->getNextMeaningfulToken($index);
+        if (null === $nextMeaningful) {
+            return false;
+        }
+
+        // Check if next token is a method name (T_STRING) followed by parentheses
+        if (!$tokens[$nextMeaningful]->isGivenKind(T_STRING)) {
+            return false;
+        }
+
+        $afterMethod = $tokens->getNextMeaningfulToken($nextMeaningful);
+        if (null === $afterMethod) {
+            return false;
+        }
+
+        // Must be followed by ( to be a method call
+        return $tokens[$afterMethod]->equals('(');
+    }
+
+    /**
+     * Check if static method operator can be moved to next line
+     */
+    private function canStaticBeMovedToNextLine(int $index, Tokens $tokens): bool
+    {
+        $prevMeaningful = $tokens->getPrevMeaningfulToken($index);
+        $hasCommentBefore = false;
+
+        for ($i = $index - 1; $i > $prevMeaningful; --$i) {
+            if ($tokens[$i]->isComment()) {
+                $hasCommentBefore = true;
+                continue;
+            }
+
+            if ($tokens[$i]->isWhitespace() && Preg::match('/\R/', $tokens[$i]->getContent())) {
+                return $hasCommentBefore;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Get expected indentation for static method chaining
+     */
+    private function getExpectedIndentForStatic(Tokens $tokens, int $index): string
+    {
+        $index = $tokens->getPrevMeaningfulToken($index);
+        $indent = $this->whitespacesConfig->getIndent();
+
+        for ($i = $index; $i >= 0; --$i) {
+            if ($tokens[$i]->equals(')')) {
+                $i = $tokens->findBlockStart(Tokens::BLOCK_TYPE_PARENTHESIS_BRACE, $i);
+            }
+
+            $currentIndent = $this->getIndentAt($tokens, $i);
+            if (null === $currentIndent) {
+                continue;
+            }
+
+            if ($this->staticLineRequiresExtraIndentLevel($tokens, $i, $index)) {
+                return $currentIndent.$indent;
+            }
+
+            return $currentIndent;
+        }
+
+        return $indent;
+    }
+
+    /**
+     * Check if current static method line requires extra indentation
+     */
+    private function staticLineRequiresExtraIndentLevel(Tokens $tokens, int $start, int $end): bool
+    {
+        $firstMeaningful = $tokens->getNextMeaningfulToken($start);
+
+        if ($tokens[$firstMeaningful]->isGivenKind(T_DOUBLE_COLON)) {
+            $thirdMeaningful = $tokens->getNextMeaningfulToken($tokens->getNextMeaningfulToken($firstMeaningful));
+
+            return
+                $tokens[$thirdMeaningful]->equals('(')
+                && $tokens->findBlockEnd(Tokens::BLOCK_TYPE_PARENTHESIS_BRACE, $thirdMeaningful) > $end;
+        }
+
+        return
+            !$tokens[$end]->equals(')')
+            || $tokens->findBlockStart(Tokens::BLOCK_TYPE_PARENTHESIS_BRACE, $end) >= $start;
     }
 
     /**
