@@ -496,6 +496,69 @@ foo()
 ->baz;
 ',
         ];
+// NEW: Basic static method chaining
+        yield [
+            '<?php
+
+StaticClass::method1(\'value\')
+    ::method2(\'value\')
+    ::method3(\'value\');
+',
+            '<?php
+
+StaticClass::method1(\'value\')
+::method2(\'value\')
+        ::method3(\'value\');
+',
+        ];
+
+        // NEW: Mixed instance and static chaining
+        yield [
+            '<?php
+
+$result = Factory::create()
+    ::configure()
+    ->getInstance()
+    ->setProperty()
+    ::staticMethod()
+    ->finalMethod();
+',
+            '<?php
+
+$result = Factory::create()
+::configure()
+->getInstance()
+        ->setProperty()
+::staticMethod()
+    ->finalMethod();
+',
+        ];
+
+        // NEW: Static chaining class constants vs method calls distinction
+        yield [
+            '<?php
+
+// Should NOT be affected (class constants)
+$constant = MyClass::CONSTANT;
+$anotherConstant = MyClass::ANOTHER_CONSTANT;
+
+// Should be affected (method calls)
+$result = MyClass::factory()
+    ::configure()
+    ::build();
+',
+            '<?php
+
+// Should NOT be affected (class constants)
+$constant = MyClass::CONSTANT;
+$anotherConstant = MyClass::ANOTHER_CONSTANT;
+
+// Should be affected (method calls)
+$result = MyClass::factory()
+::configure()
+        ::build();
+',
+        ];
     }
 
     /**
